@@ -19,8 +19,10 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -31,6 +33,11 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.IOException
 import java.util.*
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.Response
+import okhttp3.WebSocket
+import okhttp3.WebSocketListener
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -56,7 +63,19 @@ fun PrinterApp() {
     var pairedDevices by remember { mutableStateOf<List<BluetoothDevice>>(emptyList()) }
     var selectedDevice by remember { mutableStateOf<BluetoothDevice?>(null) }
     var statusMessage by remember { mutableStateOf("Ready") }
+    
+    // Printer Size State (58mm or 80mm)
+    var printerSize by remember { mutableStateOf("58mm") }
+    
     val scope = rememberCoroutineScope()
+
+    // WebSocket States
+    var serverUrl by remember { mutableStateOf("ws://192.168.1.5:8080") }
+    var isConnected by remember { mutableStateOf(false) }
+    var activeWebSocket by remember { mutableStateOf<WebSocket?>(null) }
+    
+    // OkHttpClient
+    val client = remember { OkHttpClient() }
 
     // Permissions handling
     val permissionsToRequest = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -89,31 +108,158 @@ fun PrinterApp() {
     }
 
     Column(modifier = Modifier.padding(16.dp)) {
-        Text("Bluetooth Printer App", style = MaterialTheme.typography.headlineMedium)
-        Spacer(modifier = Modifier.height(16.dp))
-
-        OutlinedTextField(
-            value = textToPrint,
-            onValueChange = { textToPrint = it },
-            label = { Text("Teks untuk dicetak") },
-            modifier = Modifier.fillMaxWidth()
-        )
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        Text("Status: $statusMessage")
+        Text("Bluetooth Printer Gateway", style = MaterialTheme.typography.headlineMedium)
         
         Spacer(modifier = Modifier.height(8.dp))
-
-        Button(onClick = {
-            pairedDevices = getPairedDevices(context)
-        }) {
-            Text("Refresh Perangkat")
+        
+        // --- STATUS SECTION (MOVED TO TOP) ---
+        Card(
+            colors = CardDefaults.cardColors(
+                containerColor = if (statusMessage.contains("Error") || statusMessage.contains("Gagal")) 
+                    MaterialTheme.colorScheme.errorContainer 
+                else if (statusMessage.contains("Terhubung") || statusMessage.contains("Berhasil"))
+                    MaterialTheme.colorScheme.primaryContainer
+                else
+                    MaterialTheme.colorScheme.surfaceVariant
+            ),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(
+                text = "Status: $statusMessage",
+                modifier = Modifier.padding(8.dp),
+                style = MaterialTheme.typography.bodyMedium
+            )
         }
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        Text("Pilih Perangkat:", style = MaterialTheme.typography.titleMedium)
+        // --- SERVER SECTION ---
+        Card(
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text("Server Gateway (OkHttp)", style = MaterialTheme.typography.titleMedium)
+                Spacer(modifier = Modifier.height(8.dp))
+                
+                OutlinedTextField(
+                    value = serverUrl,
+                    onValueChange = { serverUrl = it },
+                    label = { Text("Server URL (ws://...)") },
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = !isConnected
+                )
+                
+                Spacer(modifier = Modifier.height(8.dp))
+                
+                Button(
+                    onClick = {
+                        if (isConnected) {
+                            activeWebSocket?.close(1000, "User disconnected")
+                            activeWebSocket = null
+                            isConnected = false
+                            statusMessage = "Disconnected from server"
+                        } else {
+                            if (serverUrl.isBlank()) {
+                                Toast.makeText(context, "Masukkan URL Server", Toast.LENGTH_SHORT).show()
+                                return@Button
+                            }
+                            
+                            val request = Request.Builder().url(serverUrl).build()
+                            val listener = object : WebSocketListener() {
+                                override fun onOpen(webSocket: WebSocket, response: Response) {
+                                    scope.launch {
+                                        isConnected = true
+                                        statusMessage = "Terhubung ke Server!"
+                                    }
+                                }
+
+                                override fun onMessage(webSocket: WebSocket, text: String) {
+                                    scope.launch {
+                                        statusMessage = "Pesan masuk: $text"
+                                        val device = selectedDevice
+                                        if (device != null) {
+                                            val success = printText(context, device, text)
+                                            statusMessage = if (success) "Cetak Otomatis Berhasil ($printerSize)" else "Gagal Mencetak"
+                                        } else {
+                                            statusMessage = "Data diterima tapi belum ada printer dipilih!"
+                                        }
+                                    }
+                                }
+
+                                override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                                    scope.launch {
+                                        isConnected = false
+                                        statusMessage = "Server closing: $reason"
+                                    }
+                                }
+
+                                override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                                    scope.launch {
+                                        isConnected = false
+                                        statusMessage = "Connection Error: ${t.message}"
+                                    }
+                                }
+                            }
+                            
+                            try {
+                                activeWebSocket = client.newWebSocket(request, listener)
+                                statusMessage = "Menghubungkan..."
+                            } catch (e: Exception) {
+                                statusMessage = "Error: ${e.message}"
+                            }
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (isConnected) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(if (isConnected) "PUTUSKAN KONEKSI" else "SAMBUNGKAN SERVER")
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // --- MANUAL PRINT SECTION ---
+        Text("Manual Print", style = MaterialTheme.typography.titleMedium)
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedTextField(
+                value = textToPrint,
+                onValueChange = { textToPrint = it },
+                label = { Text("Tes Teks") },
+                modifier = Modifier.weight(1f)
+            )
+            Button(
+                onClick = {
+                    if (selectedDevice != null) {
+                        scope.launch {
+                            statusMessage = "Mencetak ($printerSize)..."
+                            printText(context, selectedDevice!!, textToPrint)
+                            statusMessage = "Selesai"
+                        }
+                    }
+                },
+                enabled = selectedDevice != null
+            ) {
+                Text("Print")
+            }
+        }
+        
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // --- DEVICE LIST SECTION ---
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+        ) {
+            Text("Pilih Perangkat Bluetooth:", style = MaterialTheme.typography.titleMedium)
+            IconButton(onClick = { pairedDevices = getPairedDevices(context) }) {
+                Text("↻", style = MaterialTheme.typography.headlineSmall)
+            }
+        }
         
         LazyColumn(modifier = Modifier.weight(1f).fillMaxWidth()) {
             items(pairedDevices) { device ->
@@ -123,7 +269,7 @@ fun PrinterApp() {
                         .padding(vertical = 4.dp)
                         .clickable {
                             selectedDevice = device
-                            statusMessage = "Perangkat dipilih: ${device.name}"
+                            statusMessage = "Printer dipilih: ${device.name}"
                         },
                     colors = if (selectedDevice == device) 
                         CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer) 
@@ -137,22 +283,33 @@ fun PrinterApp() {
             }
         }
 
-        Button(
-            onClick = {
-                if (selectedDevice != null) {
-                    scope.launch {
-                        statusMessage = "Mencetak..."
-                        val success = printText(context, selectedDevice!!, textToPrint)
-                        statusMessage = if (success) "Cetak Berhasil!" else "Cetak Gagal"
-                    }
-                } else {
-                    Toast.makeText(context, "Pilih perangkat dulu", Toast.LENGTH_SHORT).show()
-                }
-            },
-            modifier = Modifier.fillMaxWidth(),
-            enabled = selectedDevice != null
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // --- PRINTER SIZE SELECTION (BOTTOM) ---
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)
         ) {
-            Text("CETAK")
+            Text("Ukuran Kertas:", style = MaterialTheme.typography.bodyMedium)
+            Spacer(modifier = Modifier.width(16.dp))
+            
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                RadioButton(
+                    selected = printerSize == "58mm",
+                    onClick = { printerSize = "58mm" }
+                )
+                Text("58mm", modifier = Modifier.clickable { printerSize = "58mm" })
+            }
+            
+            Spacer(modifier = Modifier.width(16.dp))
+            
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                RadioButton(
+                    selected = printerSize == "80mm",
+                    onClick = { printerSize = "80mm" }
+                )
+                Text("80mm", modifier = Modifier.clickable { printerSize = "80mm" })
+            }
         }
     }
 }
@@ -168,7 +325,6 @@ fun getPairedDevices(context: Context): List<BluetoothDevice> {
 
     if (ActivityCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED &&
         Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-        // Permission check handled in UI, but safety check here
         return emptyList()
     }
 
@@ -184,23 +340,21 @@ suspend fun printText(context: Context, device: BluetoothDevice, text: String): 
                 return@withContext false
             }
 
-            // Standard UUID for SPP (Serial Port Profile)
             val uuid = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
             socket = device.createRfcommSocketToServiceRecord(uuid)
             socket.connect()
 
             val outputStream = socket.outputStream
-            // Print text
             outputStream.write((text + "\n").toByteArray())
             
-            // Add blank lines for spacing before cutting (increased as requested)
+            // Jarak sebelum potong kertas
             outputStream.write(byteArrayOf(0x0A, 0x0A, 0x0A, 0x0A, 0x0A))
 
-            // ESC/POS command for full paper cut
+            // Command Potong Kertas
             val cutCommand = byteArrayOf(0x1D, 0x56, 0x00)
             outputStream.write(cutCommand)
 
-            outputStream.flush() // Ensure all data is sent
+            outputStream.flush() 
 
             true
         } catch (e: IOException) {
