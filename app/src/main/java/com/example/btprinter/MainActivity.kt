@@ -142,7 +142,7 @@ fun PrinterApp() {
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
-                Text("Server Gateway (OkHttp)", style = MaterialTheme.typography.titleMedium)
+                Text("Server Gateway", style = MaterialTheme.typography.titleMedium)
                 Spacer(modifier = Modifier.height(8.dp))
                 
                 OutlinedTextField(
@@ -158,7 +158,7 @@ fun PrinterApp() {
                 OutlinedTextField(
                     value = challengeCode,
                     onValueChange = { challengeCode = it },
-                    label = { Text("Challenge Code (ID)") },
+                    label = { Text("Challenge Code") },
                     modifier = Modifier.fillMaxWidth(),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     enabled = !isConnected,
