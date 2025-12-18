@@ -20,11 +20,13 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.core.app.ActivityCompat
 import com.example.btprinter.ui.theme.BtPrinterTheme
@@ -71,6 +73,7 @@ fun PrinterApp() {
 
     // WebSocket States
     var serverUrl by remember { mutableStateOf("ws://192.168.1.5:8080") }
+    var challengeCode by remember { mutableStateOf("") }
     var isConnected by remember { mutableStateOf(false) }
     var activeWebSocket by remember { mutableStateOf<WebSocket?>(null) }
     
@@ -112,7 +115,7 @@ fun PrinterApp() {
         
         Spacer(modifier = Modifier.height(8.dp))
         
-        // --- STATUS SECTION (MOVED TO TOP) ---
+        // --- STATUS SECTION ---
         Card(
             colors = CardDefaults.cardColors(
                 containerColor = if (statusMessage.contains("Error") || statusMessage.contains("Gagal")) 
@@ -151,6 +154,18 @@ fun PrinterApp() {
                 )
                 
                 Spacer(modifier = Modifier.height(8.dp))
+
+                OutlinedTextField(
+                    value = challengeCode,
+                    onValueChange = { challengeCode = it },
+                    label = { Text("Challenge Code (ID)") },
+                    modifier = Modifier.fillMaxWidth(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    enabled = !isConnected,
+                    singleLine = true
+                )
+                
+                Spacer(modifier = Modifier.height(8.dp))
                 
                 Button(
                     onClick = {
@@ -165,12 +180,22 @@ fun PrinterApp() {
                                 return@Button
                             }
                             
-                            val request = Request.Builder().url(serverUrl).build()
+                            if (challengeCode.isBlank()) {
+                                Toast.makeText(context, "Masukkan Challenge Code", Toast.LENGTH_SHORT).show()
+                                return@Button
+                            }
+
+                            // Append challenge code to URL as query parameter
+                            // Format: ws://server:port/?id=CHALLENGE_CODE
+                            val separator = if (serverUrl.contains("?")) "&" else "?"
+                            val finalUrl = "$serverUrl${separator}id=$challengeCode"
+                            
+                            val request = Request.Builder().url(finalUrl).build()
                             val listener = object : WebSocketListener() {
                                 override fun onOpen(webSocket: WebSocket, response: Response) {
                                     scope.launch {
                                         isConnected = true
-                                        statusMessage = "Terhubung ke Server!"
+                                        statusMessage = "Terhubung! ID: $challengeCode"
                                     }
                                 }
 
