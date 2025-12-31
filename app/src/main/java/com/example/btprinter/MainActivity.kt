@@ -19,7 +19,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -30,16 +29,14 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.core.app.ActivityCompat
 import com.example.btprinter.ui.theme.BtPrinterTheme
+import io.socket.client.IO
+import io.socket.client.Socket
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 import java.io.IOException
 import java.util.*
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.Response
-import okhttp3.WebSocket
-import okhttp3.WebSocketListener
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -71,14 +68,13 @@ fun PrinterApp() {
     
     val scope = rememberCoroutineScope()
 
-    // WebSocket States
-    var serverUrl by remember { mutableStateOf("ws://192.168.1.5:8080") }
+    // Socket.IO States
+    var serverUrl by remember { mutableStateOf("https://domainmu.com:5678") }
     var challengeCode by remember { mutableStateOf("") }
     var isConnected by remember { mutableStateOf(false) }
-    var activeWebSocket by remember { mutableStateOf<WebSocket?>(null) }
     
-    // OkHttpClient
-    val client = remember { OkHttpClient() }
+    // Keep socket instance
+    var mSocket by remember { mutableStateOf<Socket?>(null) }
 
     // Permissions handling
     val permissionsToRequest = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -120,7 +116,7 @@ fun PrinterApp() {
             colors = CardDefaults.cardColors(
                 containerColor = if (statusMessage.contains("Error") || statusMessage.contains("Gagal")) 
                     MaterialTheme.colorScheme.errorContainer 
-                else if (statusMessage.contains("Terhubung") || statusMessage.contains("Berhasil"))
+                else if (statusMessage.contains("Terhubung") || statusMessage.contains("Berhasil") || statusMessage.contains("Sukses"))
                     MaterialTheme.colorScheme.primaryContainer
                 else
                     MaterialTheme.colorScheme.surfaceVariant
@@ -142,13 +138,13 @@ fun PrinterApp() {
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
-                Text("Server Gateway", style = MaterialTheme.typography.titleMedium)
+                Text("Server Gateway (Socket.IO)", style = MaterialTheme.typography.titleMedium)
                 Spacer(modifier = Modifier.height(8.dp))
                 
                 OutlinedTextField(
                     value = serverUrl,
                     onValueChange = { serverUrl = it },
-                    label = { Text("Server URL (ws://...)") },
+                    label = { Text("Server URL (https://...)") },
                     modifier = Modifier.fillMaxWidth(),
                     enabled = !isConnected
                 )
@@ -170,8 +166,9 @@ fun PrinterApp() {
                 Button(
                     onClick = {
                         if (isConnected) {
-                            activeWebSocket?.close(1000, "User disconnected")
-                            activeWebSocket = null
+                            mSocket?.disconnect()
+                            mSocket?.off()
+                            mSocket = null
                             isConnected = false
                             statusMessage = "Disconnected from server"
                         } else {
@@ -185,53 +182,95 @@ fun PrinterApp() {
                                 return@Button
                             }
 
-                            // Append challenge code to URL as query parameter
-                            // Format: ws://server:port/?id=CHALLENGE_CODE
-                            val separator = if (serverUrl.contains("?")) "&" else "?"
-                            val finalUrl = "$serverUrl${separator}id=$challengeCode"
-                            
-                            val request = Request.Builder().url(finalUrl).build()
-                            val listener = object : WebSocketListener() {
-                                override fun onOpen(webSocket: WebSocket, response: Response) {
+                            try {
+                                val options = IO.Options()
+                                options.transports = arrayOf("websocket")
+                                
+                                val socket = IO.socket(serverUrl, options)
+                                
+                                socket.on(Socket.EVENT_CONNECT) {
                                     scope.launch {
-                                        isConnected = true
-                                        statusMessage = "Terhubung! ID: $challengeCode"
+                                        statusMessage = "Terhubung! Login..."
+                                        // 1. Emit Identify
+                                        val identifyPayload = JSONObject().apply {
+                                            put("code", challengeCode)
+                                        }
+                                        socket.emit("identify_printer", identifyPayload)
                                     }
                                 }
 
-                                override fun onMessage(webSocket: WebSocket, text: String) {
+                                socket.on(Socket.EVENT_DISCONNECT) {
                                     scope.launch {
-                                        statusMessage = "Pesan masuk: $text"
-                                        val device = selectedDevice
-                                        if (device != null) {
-                                            val success = printText(context, device, text)
-                                            statusMessage = if (success) "Cetak Otomatis Berhasil ($printerSize)" else "Gagal Mencetak"
-                                        } else {
-                                            statusMessage = "Data diterima tapi belum ada printer dipilih!"
+                                        isConnected = false
+                                        statusMessage = "Terputus dari server"
+                                    }
+                                }
+
+                                socket.on(Socket.EVENT_CONNECT_ERROR) { args ->
+                                    scope.launch {
+                                        isConnected = false
+                                        val err = if (args.isNotEmpty()) args[0].toString() else "Unknown Error"
+                                        statusMessage = "Connection Error: $err"
+                                    }
+                                }
+
+                                // 2A. Listener Status Koneksi
+                                socket.on("printer_connected") { args ->
+                                    scope.launch {
+                                        try {
+                                            if (args.isNotEmpty() && args[0] is JSONObject) {
+                                                val data = args[0] as JSONObject
+                                                val status = data.optBoolean("status")
+                                                if (status) {
+                                                    isConnected = true
+                                                    statusMessage = "Login Berhasil! Siap Mencetak."
+                                                } else {
+                                                    val errorMsg = data.optString("error", "Login Gagal")
+                                                    statusMessage = "Gagal: $errorMsg"
+                                                    socket.disconnect()
+                                                }
+                                            }
+                                        } catch (e: Exception) {
+                                            statusMessage = "Error parsing login response"
                                         }
                                     }
                                 }
 
-                                override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                                // 2B. Listener Pesan Masuk
+                                socket.on("print_message") { args ->
                                     scope.launch {
-                                        isConnected = false
-                                        statusMessage = "Server closing: $reason"
+                                        try {
+                                            if (args.isNotEmpty() && args[0] is JSONObject) {
+                                                val data = args[0] as JSONObject
+                                                // Ambil field "message" dari JSON
+                                                val messageToPrint = data.optString("message", "")
+                                                
+                                                if (messageToPrint.isNotEmpty()) {
+                                                    textToPrint = messageToPrint // Update textfield manual untuk info
+                                                    statusMessage = "Mencetak pesan masuk..."
+                                                    
+                                                    val device = selectedDevice
+                                                    if (device != null) {
+                                                        // Langsung cetak isi message-nya saja
+                                                        val success = printText(context, device, messageToPrint)
+                                                        statusMessage = if (success) "Sukses mencetak pesan masuk" else "Gagal Mencetak"
+                                                    } else {
+                                                        statusMessage = "Pesan diterima, tapi Printer belum dipilih!"
+                                                    }
+                                                }
+                                            }
+                                        } catch (e: Exception) {
+                                            statusMessage = "Error processing print message"
+                                        }
                                     }
                                 }
 
-                                override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                                    scope.launch {
-                                        isConnected = false
-                                        statusMessage = "Connection Error: ${t.message}"
-                                    }
-                                }
-                            }
-                            
-                            try {
-                                activeWebSocket = client.newWebSocket(request, listener)
+                                socket.connect()
+                                mSocket = socket
                                 statusMessage = "Menghubungkan..."
+
                             } catch (e: Exception) {
-                                statusMessage = "Error: ${e.message}"
+                                statusMessage = "Error Init: ${e.message}"
                             }
                         }
                     },
