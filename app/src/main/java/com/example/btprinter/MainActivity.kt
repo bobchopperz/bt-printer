@@ -246,7 +246,8 @@ fun PrinterApp() {
                                                 val messageToPrint = data.optString("message", "")
                                                 
                                                 if (messageToPrint.isNotEmpty()) {
-                                                    textToPrint = messageToPrint // Update textfield manual untuk info
+                                                    // HAPUS: textToPrint = messageToPrint 
+                                                    // Pesan dari server tidak mengganggu inputan manual
                                                     statusMessage = "Mencetak pesan masuk..."
                                                     
                                                     val device = selectedDevice
